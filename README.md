@@ -3,7 +3,7 @@
 # LiftOff-CV V1
 by Mohammad Khirz El Jausyan - 5024241009
 
-a simple hand vision controlled drone simulator for beginner
+a simple hand computer vision controlled drone simulator for beginner
 
 ## Features
 
