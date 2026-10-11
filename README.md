@@ -20,6 +20,14 @@ python src/main.py
 
 Use `--cam 1` to select another camera. Press `q` to quit.
 
+## Overview
+
+Development progress: the current prototype shows the mirrored webcam feed and visualizes hand detection with a bounding box, center point, and mask.
+
+<p align="center">
+  <img src="img/dev-1.png" alt="Development progress" width="480">
+</p>
+
 ## Tech stack and approach
 
 - **Python** for the application.
