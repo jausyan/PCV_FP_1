@@ -1,3 +1,5 @@
+# ![LiftOff-CV header](img/header.png)
+
 # LiftOff-CV V1
 by Mohammad Khirz El Jausyan - 5024241009
 
