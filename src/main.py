@@ -1,6 +1,6 @@
 import argparse
 import cv2
-from utils.utils_ import (MAIN_WIN, DetectorConfig, SampleState, TrackState, create_trackbars, detect_hand, draw_detection, draw_hud, draw_rois, load_config, open_camera, read_frame, read_trackbars, sample_skin, save_config, set_roi, set_trackbars, setup_sampling, show)
+from utils.utils_ import (MAIN_WIN, BgState, DetectorConfig, FaceState, SampleState, TrackState, create_trackbars, detect_hand, draw_detection, draw_faces, draw_hud, draw_rois, load_config, open_camera, read_frame, read_trackbars, sample_skin, save_config, set_roi, set_trackbars, setup_sampling, show, start_bg_capture, update_bg, update_faces)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -10,6 +10,8 @@ def main():
     cfg = load_config()
     state = SampleState()
     track = TrackState()
+    face = FaceState()
+    bg = BgState()
     msg = ""
     cv2.namedWindow(MAIN_WIN)
     create_trackbars(cfg)
@@ -33,8 +35,16 @@ def main():
             track.bbox = None
         read_trackbars(cfg)
 
-        det, mask, search = detect_hand(frame, cfg, track)
+        if bg.capturing:
+            if update_bg(frame, bg, cfg):
+                msg = "background captured"
+            else:
+                msg = f"capturing background {bg.n}/{cfg.bg_frames} - keep hand out"
+        update_faces(frame, face, cfg)
+
+        det, mask, search = detect_hand(frame, cfg, track, face, bg)
         draw_rois(frame, cfg, search)
+        draw_faces(frame, face)
         draw_detection(frame, det)
         draw_hud(frame, state, msg)
 
@@ -53,6 +63,15 @@ def main():
             cfg.roi = DetectorConfig().roi
             track.bbox = None
             msg = "ROI reset"
+        elif key == ord("b"):
+            start_bg_capture(bg)
+            track.bbox = None
+        elif key == ord("x"):
+            bg.model = None
+            msg = "background cleared"
+        elif key == ord("f"):
+            cfg.use_face = not cfg.use_face
+            msg = f"face exclusion {'on' if cfg.use_face else 'off'}"
         elif key == ord("t"):
             cfg.use_tracking = not cfg.use_tracking
             track.bbox = None
