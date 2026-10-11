@@ -3,6 +3,10 @@ by Mohammad Khirz El Jausyan - 5024241009
 
 a simple hand vision controlled drone simulator for beginner
 
+## Features
+
+the Development now Oct 11, I Just added a mirrored webcam feed and uses HSV and YCrCb color thresholds to detect a hand. Gaussian blur and morphological filtering help reduce image noise. When a hand is detected, the app marks its bounding box and center point, while a separate window shows the detection mask. You can select a camera with `--cam` and quit by pressing `q`. Hand movement controls for the 2D drone simulator are planned.
+
 ## Run
 
 Install dependencies and start :
