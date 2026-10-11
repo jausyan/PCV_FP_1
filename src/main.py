@@ -1,25 +1,16 @@
-"""Phase 2: calibration UI. Drag a box on your hand to sample skin color,
-tune with the trackbars, s=save, l=load, q=quit."""
 import argparse
-
 import cv2
-
-from utils.utils_ import (MAIN_WIN, SampleState, create_trackbars,
-                          detect_hand, draw_detection, draw_hud, load_config,
-                          open_camera, read_frame, read_trackbars, sample_skin,
-                          save_config, set_trackbars, setup_sampling, show)
-
+from utils.utils_ import (MAIN_WIN, DetectorConfig, SampleState, TrackState, create_trackbars, detect_hand, draw_detection, draw_hud, draw_rois, load_config, open_camera, read_frame, read_trackbars, sample_skin, save_config, set_roi, set_trackbars, setup_sampling, show)
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cam", type=int, default=0, help="camera index")
     args = ap.parse_args()
-
     cap = open_camera(args.cam)
     cfg = load_config()
     state = SampleState()
+    track = TrackState()
     msg = ""
-
     cv2.namedWindow(MAIN_WIN)
     create_trackbars(cfg)
     setup_sampling(state)
@@ -35,9 +26,15 @@ def main():
             state.pending = None
             if ok:
                 set_trackbars(cfg)
+        if state.roi_pending:
+            ok = set_roi(cfg, state.roi_pending, frame.shape)
+            msg = "ROI set" if ok else "ROI too small"
+            state.roi_pending = None
+            track.bbox = None
         read_trackbars(cfg)
 
-        det, mask = detect_hand(frame, cfg)
+        det, mask, search = detect_hand(frame, cfg, track)
+        draw_rois(frame, cfg, search)
         draw_detection(frame, det)
         draw_hud(frame, state, msg)
 
@@ -50,7 +47,16 @@ def main():
         elif key == ord("l"):
             cfg = load_config()
             set_trackbars(cfg)
+            track.bbox = None
             msg = "loaded config.json"
+        elif key == ord("r"):
+            cfg.roi = DetectorConfig().roi
+            track.bbox = None
+            msg = "ROI reset"
+        elif key == ord("t"):
+            cfg.use_tracking = not cfg.use_tracking
+            track.bbox = None
+            msg = f"tracking {'on' if cfg.use_tracking else 'off'}"
 
     cap.release()
     cv2.destroyAllWindows()
