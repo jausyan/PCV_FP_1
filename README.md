@@ -28,6 +28,32 @@ Development progress: the current prototype shows the mirrored webcam feed and v
   <img src="img/dev-1.png" alt="Development progress" width="480">
 </p>
 
+## Project timeline
+
+### 1. Hand capture and stable tracking
+
+The first stage captures the hand from the webcam and uses a region of interest (ROI) to focus detection. This helps make detection more stable and reduces jitter in the hand's bounding box.
+
+<p align="center">
+  <img src="img/dev-1.png" alt="Initial hand capture and ROI tracking" width="480">
+</p>
+
+### 2. Color threshold calibration
+
+The thresholding calibration stage tunes the color range used to identify the hand in different camera conditions.
+
+<p align="center">
+  <img src="img/dev-2.png" alt="Hand color threshold calibration" width="480">
+</p>
+
+### 3. Hand tracking controls the game
+
+The tracked hand's pixel position changes are mapped to controls in the Pygame simulator.
+
+<p align="center">
+  <img src="img/dev-3.png" alt="Pixel changes controlling the Pygame simulator" width="480">
+</p>
+
 ## Tech stack and approach
 
 - **Python** for the application.
