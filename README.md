@@ -25,8 +25,14 @@ Use `--cam 1` to select another camera. Press `q` to quit.
 Development progress: the current prototype shows the mirrored webcam feed and visualizes hand detection with a bounding box, center point, and mask.
 
 <p align="center">
-  <img src="img/dev-1.png" alt="Development progress" width="480">
+  <img src="img/ov-1.png" alt="Development progress" width="480">
 </p>
+gameplay
+
+<p align="center">
+  <img src="img/ov-2.png" alt="Development progress" width="480">
+</p>
+gameover display
 
 ## Project timeline
 
