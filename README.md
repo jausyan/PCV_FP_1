@@ -7,7 +7,7 @@ a simple hand vision controlled drone simulator for beginner
 
 ## Features
 
-the Development now Oct 11, I Just added a mirrored webcam feed and uses HSV and YCrCb color thresholds to detect a hand. Gaussian blur and morphological filtering help reduce image noise. When a hand is detected, the app marks its bounding box and center point, while a separate window shows the detection mask. You can select a camera with `--cam` and quit by pressing `q`. Hand movement controls for the 2D drone simulator are planned.
+The app displays a mirrored webcam feed and detects a hand using HSV and YCrCb color thresholds. An adjustable region of interest (ROI) limits where the detector searches, and tracking narrows the search around the last hand position. A captured background model rejects pixels that have not changed, helping reduce false detections from the scene. The bounding box and center are smoothed to reduce jitter, and the detection mask is shown in a separate window. Hand position controls the Pygame drone simulator. Select a camera with `--cam` and press `q` to quit.
 
 ## Run
 
@@ -60,10 +60,17 @@ The tracked hand's pixel position changes are mapped to controls in the Pygame s
   <img src="img/dev-3.png" alt="Pixel changes controlling the Pygame simulator" width="480">
 </p>
 
+## Feature
+
+1. **Set the ROI:** Detection runs only inside the selected area of the camera frame. You can draw an ROI to focus on the space where your hand will move.
+2. **Capture the background:** Capture a model of the empty scene with your hand out of view. The app averages 30 frames, then compares each new frame with that model. Pixels whose color change exceeds the background threshold are kept, which helps reject static background objects.
+3. **Find the hand:** Within the ROI and changed-pixel mask, the app applies HSV and YCrCb color thresholds. Gaussian blur and morphological opening and closing reduce noise; the largest valid contour is used as the hand candidate. Face regions can also be excluded.
+4. **Stabilize and control:** Once tracking starts, the search area follows the previous bounding box. Position smoothing, stable-frame checks, jump limits, and a short hold after missed detections reduce jitter. The hand's position and apparent size are mapped to Pygame movement controls.
+
 ## Tech stack and approach
 
 - **Python** for the application.
 - **OpenCV** for webcam input, image processing, and display.
 - **NumPy** for image and threshold operations.
-- **Hand detection:** color thresholding in HSV and YCrCb, with blur and morphological filtering. ROI restriction and background rejection are planned to improve detection.
-- **Game:** a 2D drone simulator controlled by hand movements; game controls and simulator are planned.
+- **Hand detection:** HSV/YCrCb color thresholding, adjustable ROI, background difference mask, optional face exclusion, and smoothed contour tracking.
+- **Game:** Pygame 2D drone simulator controlled by hand position and size.
