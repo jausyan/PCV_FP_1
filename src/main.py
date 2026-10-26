@@ -4,10 +4,10 @@ import time
 import cv2
 
 from utils.utils_ import (
-    MAIN_WIN, Control, Drone, Session,
+    MAIN_WIN, Control, Game, Session,
     apply_mouse_requests, create_trackbars, draw_game, draw_overlays, game_running,
     get_frame, handle_key, hand_to_control, init_game, load_config, open_camera,
-    process_frame, setup_mouse, show, start_grabber, stop_grabber, update_drone,
+    process_frame, setup_mouse, show, start_grabber, stop_grabber, update_game,
 )
 
 STALL_SECONDS = 0.5  # no new camera frame for this long -> drone goes neutral
@@ -20,7 +20,7 @@ def main():
 
     cap = open_camera(args.cam)
     session = Session(cfg=load_config())
-    drone, ctrl = Drone(), Control()
+    game, ctrl = Game(), Control()
 
     cv2.namedWindow(MAIN_WIN)
     create_trackbars(session.cfg)
@@ -43,8 +43,8 @@ def main():
             ctrl = Control()
 
         running = game_running() and running
-        update_drone(drone, ctrl, clock.tick(60) / 1000)
-        draw_game(screen, font, drone, ctrl)
+        update_game(game, ctrl, clock.tick(60) / 1000)
+        draw_game(screen, font, game, ctrl)
 
     stop_grabber(grabber)
     cap.release()

@@ -1,7 +1,9 @@
 
 import json
 import math
+import random
 import threading
+from functools import lru_cache
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -21,6 +23,11 @@ DRONE_R = 28
 ACCEL = 1100.0
 DRAG = 2.0
 MAX_V = 420.0
+
+COIN_R = 14
+COIN_VALUES = (1, 10)  # inclusive range of points a coin can be worth
+COIN_MIN_DIST = 150    # new coins spawn at least this far from the drone
+HUD_BOX = (0, 0, 230, 110)  # keep coins out from under the left-hand readouts
 
 
 def _clip(v, lo, hi):
@@ -133,6 +140,35 @@ class Drone:
     vx: float = 0.0
     vy: float = 0.0
     spin: float = 0.0
+
+
+@dataclass
+class Coin:
+    x: float
+    y: float
+    value: int
+    age: float = 0.0
+
+
+@dataclass
+class Pop:
+    """Floating "+N" that rises from where a coin was picked up."""
+    x: float
+    y: float
+    value: int
+    ttl: float = 1.0
+
+
+@dataclass
+class Game:
+    drone: Drone = field(default_factory=Drone)
+    rng: random.Random = field(default_factory=random.Random)
+    coin: Coin = None
+    score: int = 0
+    pops: list = field(default_factory=list)
+
+    def __post_init__(self):
+        spawn_coin(self)
 
 
 @dataclass
@@ -451,6 +487,53 @@ def update_drone(drone: Drone, ctrl: Control, dt: float) -> None:
     drone.spin += dt * (18 + math.hypot(drone.vx, drone.vy) * 0.05)
 
 
+def spawn_coin(game: Game) -> None:
+    """Drop a coin of random value at a random spot, away from the drone and the HUD."""
+    w, h = GAME_SIZE
+    margin = COIN_R + 40
+    while True:
+        x = game.rng.uniform(margin, w - margin)
+        y = game.rng.uniform(margin, h - margin)
+        in_hud = HUD_BOX[0] <= x <= HUD_BOX[2] and HUD_BOX[1] <= y <= HUD_BOX[3]
+        if not in_hud and math.hypot(x - game.drone.x, y - game.drone.y) >= COIN_MIN_DIST:
+            break
+    game.coin = Coin(x, y, game.rng.randint(*COIN_VALUES))
+
+
+def update_game(game: Game, ctrl: Control, dt: float) -> None:
+    update_drone(game.drone, ctrl, dt)
+    coin, drone = game.coin, game.drone
+    coin.age += dt
+    if math.hypot(drone.x - coin.x, drone.y - coin.y) < DRONE_R + COIN_R:
+        game.score += coin.value
+        game.pops.append(Pop(coin.x, coin.y, coin.value))
+        spawn_coin(game)
+    for pop in game.pops:
+        pop.y -= 40 * dt
+        pop.ttl -= dt
+    game.pops = [p for p in game.pops if p.ttl > 0]
+
+
+@lru_cache(maxsize=None)
+def _font(size: int):
+    return pygame.font.SysFont(None, size)
+
+
+def _draw_text(screen, text, size, color, pos, alpha=255, anchor="topleft"):
+    img = _font(size).render(text, True, color)
+    img.set_alpha(alpha)
+    screen.blit(img, img.get_rect(**{anchor: pos}))
+
+
+def _draw_coin(screen, coin: Coin):
+    cx, cy = int(coin.x), int(coin.y + math.sin(coin.age * 4) * 3)
+    glow = int(COIN_R + 6 + math.sin(coin.age * 6) * 2)
+    pygame.draw.circle(screen, (70, 56, 20), (cx, cy), glow)
+    pygame.draw.circle(screen, (212, 160, 20), (cx, cy), COIN_R)
+    pygame.draw.circle(screen, (255, 205, 60), (cx, cy), COIN_R - 3)
+    _draw_text(screen, str(coin.value), 22, (120, 80, 0), (cx, cy), anchor="center")
+
+
 def _draw_bar(screen, font, label, value, y):
 
     screen.blit(font.render(label, True, (200, 200, 200)), (12, y))
@@ -490,9 +573,15 @@ def _draw_drone(screen, drone: Drone, present: bool):
     pygame.draw.circle(screen, body, (int(drone.x), int(drone.y)), 11)
 
 
-def draw_game(screen, font, drone: Drone, ctrl: Control) -> None:
+def draw_game(screen, font, game: Game, ctrl: Control) -> None:
     _draw_grid(screen)
-    _draw_drone(screen, drone, ctrl.present)
+    _draw_coin(screen, game.coin)
+    _draw_drone(screen, game.drone, ctrl.present)
+    for pop in game.pops:
+        _draw_text(screen, f"+{pop.value}", 30, (255, 215, 80), (pop.x, pop.y),
+                   alpha=int(255 * pop.ttl), anchor="center")
+    _draw_text(screen, f"SCORE {game.score}", 40, (255, 215, 80),
+               (GAME_SIZE[0] - 16, 12), anchor="topright")
     _draw_bar(screen, font, "x", ctrl.dx, 12)
     _draw_bar(screen, font, "y", ctrl.dy, 32)
     screen.blit(font.render(f"speed x{ctrl.gain:.2f}", True, (200, 200, 200)), (12, 54))
