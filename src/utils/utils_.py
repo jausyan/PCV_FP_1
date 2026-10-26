@@ -26,8 +26,16 @@ MAX_V = 420.0
 
 COIN_R = 14
 COIN_VALUES = (1, 10)  # inclusive range of points a coin can be worth
-COIN_MIN_DIST = 150    # new coins spawn at least this far from the drone
-HUD_BOX = (0, 0, 230, 110)  # keep coins out from under the left-hand readouts
+SPAWN_MIN_DIST = 150   # new coins/bombs spawn at least this far from the drone
+OBJECT_GAP = 90        # ...and this far from each other
+HUD_BOX = (0, 0, 230, 110)  # keep items out from under the left-hand readouts
+
+BOMB_COUNT = 2
+BOMB_R = 16
+BOMB_HIT = DRONE_R * 0.6 + BOMB_R  # tighter than the coin pickup, bombs shouldn't feel unfair
+START_HEALTH = 3
+MAX_HEALTH = 5
+HEALTH_EVERY = 10      # +1 health each time the score crosses a multiple of this
 
 
 def _clip(v, lo, hi):
@@ -151,11 +159,19 @@ class Coin:
 
 
 @dataclass
-class Pop:
-    """Floating "+N" that rises from where a coin was picked up."""
+class Bomb:
     x: float
     y: float
-    value: int
+    age: float = 0.0
+
+
+@dataclass
+class Pop:
+    """Floating text (+5, -1, +1 HP) that rises and fades."""
+    x: float
+    y: float
+    text: str
+    color: tuple
     ttl: float = 1.0
 
 
@@ -164,10 +180,16 @@ class Game:
     drone: Drone = field(default_factory=Drone)
     rng: random.Random = field(default_factory=random.Random)
     coin: Coin = None
+    bombs: list = field(default_factory=list)
     score: int = 0
+    health: int = START_HEALTH
+    over: bool = False
     pops: list = field(default_factory=list)
 
     def __post_init__(self):
+        self.bombs = []
+        for _ in range(BOMB_COUNT):  # one at a time so each sees the ones already placed
+            self.bombs.append(spawn_bomb(self))
         spawn_coin(self)
 
 
@@ -456,13 +478,16 @@ def init_game():
     return screen, pygame.time.Clock(), pygame.font.SysFont(None, 24)
 
 
-def game_running() -> bool:
-
+def game_running(game: Game) -> bool:
+    """Pump pygame events. False on close/Esc. Space or Enter restarts after game over."""
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             return False
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-            return False
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                return False
+            if game.over and event.key in (pygame.K_SPACE, pygame.K_RETURN):
+                reset_game(game)
     return True
 
 
@@ -487,31 +512,73 @@ def update_drone(drone: Drone, ctrl: Control, dt: float) -> None:
     drone.spin += dt * (18 + math.hypot(drone.vx, drone.vy) * 0.05)
 
 
-def spawn_coin(game: Game) -> None:
-    """Drop a coin of random value at a random spot, away from the drone and the HUD."""
+def _random_spot(game: Game, skip=None) -> tuple:
+    """A random point clear of the walls, the HUD, the drone and the other items."""
     w, h = GAME_SIZE
     margin = COIN_R + 40
+    others = [o for o in (game.coin, *game.bombs) if o is not None and o is not skip]
     while True:
         x = game.rng.uniform(margin, w - margin)
         y = game.rng.uniform(margin, h - margin)
         in_hud = HUD_BOX[0] <= x <= HUD_BOX[2] and HUD_BOX[1] <= y <= HUD_BOX[3]
-        if not in_hud and math.hypot(x - game.drone.x, y - game.drone.y) >= COIN_MIN_DIST:
-            break
+        if in_hud or math.hypot(x - game.drone.x, y - game.drone.y) < SPAWN_MIN_DIST:
+            continue
+        if all(math.hypot(x - o.x, y - o.y) >= OBJECT_GAP for o in others):
+            return x, y
+
+
+def spawn_coin(game: Game) -> None:
+    game.coin = None  # don't keep away from the coin we're replacing
+    x, y = _random_spot(game)
     game.coin = Coin(x, y, game.rng.randint(*COIN_VALUES))
 
 
+def spawn_bomb(game: Game, old: Bomb = None) -> Bomb:
+    x, y = _random_spot(game, skip=old)
+    return Bomb(x, y)
+
+
+def reset_game(game: Game) -> None:
+    game.drone = Drone()
+    game.coin, game.bombs, game.pops = None, [], []
+    game.score, game.health, game.over = 0, START_HEALTH, False
+    game.__post_init__()
+
+
+def _add_score(game: Game, value: int) -> None:
+    """Add points, and give a heart each time the score crosses a multiple of HEALTH_EVERY."""
+    gained = (game.score + value) // HEALTH_EVERY - game.score // HEALTH_EVERY
+    game.score += value
+    if gained and game.health < MAX_HEALTH:
+        game.health = min(MAX_HEALTH, game.health + gained)
+        game.pops.append(Pop(game.drone.x, game.drone.y - 30, "+1 HP", (110, 230, 130)))
+
+
 def update_game(game: Game, ctrl: Control, dt: float) -> None:
-    update_drone(game.drone, ctrl, dt)
-    coin, drone = game.coin, game.drone
-    coin.age += dt
-    if math.hypot(drone.x - coin.x, drone.y - coin.y) < DRONE_R + COIN_R:
-        game.score += coin.value
-        game.pops.append(Pop(coin.x, coin.y, coin.value))
-        spawn_coin(game)
     for pop in game.pops:
         pop.y -= 40 * dt
         pop.ttl -= dt
     game.pops = [p for p in game.pops if p.ttl > 0]
+    if game.over:
+        return
+
+    update_drone(game.drone, ctrl, dt)
+    drone, coin = game.drone, game.coin
+    coin.age += dt
+    if math.hypot(drone.x - coin.x, drone.y - coin.y) < DRONE_R + COIN_R:
+        game.pops.append(Pop(coin.x, coin.y, f"+{coin.value}", (255, 215, 80)))
+        _add_score(game, coin.value)
+        spawn_coin(game)
+
+    for i, bomb in enumerate(game.bombs):
+        bomb.age += dt
+        if math.hypot(drone.x - bomb.x, drone.y - bomb.y) < BOMB_HIT:
+            game.health -= 1
+            game.pops.append(Pop(bomb.x, bomb.y, "-1", (240, 90, 90)))
+            game.bombs[i] = spawn_bomb(game, old=bomb)
+            if game.health <= 0:
+                game.over = True
+                break
 
 
 @lru_cache(maxsize=None)
@@ -532,6 +599,39 @@ def _draw_coin(screen, coin: Coin):
     pygame.draw.circle(screen, (212, 160, 20), (cx, cy), COIN_R)
     pygame.draw.circle(screen, (255, 205, 60), (cx, cy), COIN_R - 3)
     _draw_text(screen, str(coin.value), 22, (120, 80, 0), (cx, cy), anchor="center")
+
+
+def _draw_bomb(screen, bomb: Bomb):
+    cx, cy = int(bomb.x), int(bomb.y)
+    glow = int(BOMB_R + 5 + math.sin(bomb.age * 8) * 2)
+    pygame.draw.circle(screen, (80, 24, 28), (cx, cy), glow)
+    pygame.draw.circle(screen, (40, 40, 46), (cx, cy), BOMB_R)
+    pygame.draw.circle(screen, (90, 90, 100), (cx - 5, cy - 5), 4)  # shine
+    pygame.draw.line(screen, (150, 120, 70), (cx + 8, cy - 12), (cx + 14, cy - 20), 3)  # fuse
+    if int(bomb.age * 6) % 2 == 0:
+        pygame.draw.circle(screen, (255, 160, 40), (cx + 15, cy - 21), 4)  # spark
+
+
+def _draw_heart(screen, cx, cy, r, filled):
+    color = (230, 70, 90) if filled else (60, 62, 76)
+    pygame.draw.circle(screen, color, (cx - r // 2, cy - r // 4), r // 2 + 1)
+    pygame.draw.circle(screen, color, (cx + r // 2, cy - r // 4), r // 2 + 1)
+    pygame.draw.polygon(screen, color, [(cx - r, cy - r // 6), (cx + r, cy - r // 6), (cx, cy + r)])
+
+
+@lru_cache(maxsize=1)
+def _dim_overlay():
+    overlay = pygame.Surface(GAME_SIZE, pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 170))
+    return overlay
+
+
+def _draw_game_over(screen, score: int):
+    screen.blit(_dim_overlay(), (0, 0))
+    cx, cy = GAME_SIZE[0] // 2, GAME_SIZE[1] // 2
+    _draw_text(screen, "GAME OVER", 96, (240, 90, 90), (cx, cy - 40), anchor="center")
+    _draw_text(screen, f"Score {score}", 48, (255, 215, 80), (cx, cy + 30), anchor="center")
+    _draw_text(screen, "SPACE to restart  |  ESC to quit", 28, (200, 200, 200), (cx, cy + 80), anchor="center")
 
 
 def _draw_bar(screen, font, label, value, y):
@@ -576,17 +676,23 @@ def _draw_drone(screen, drone: Drone, present: bool):
 def draw_game(screen, font, game: Game, ctrl: Control) -> None:
     _draw_grid(screen)
     _draw_coin(screen, game.coin)
+    for bomb in game.bombs:
+        _draw_bomb(screen, bomb)
     _draw_drone(screen, game.drone, ctrl.present)
     for pop in game.pops:
-        _draw_text(screen, f"+{pop.value}", 30, (255, 215, 80), (pop.x, pop.y),
-                   alpha=int(255 * pop.ttl), anchor="center")
+        _draw_text(screen, pop.text, 30, pop.color, (pop.x, pop.y),
+                   alpha=int(255 * min(1.0, pop.ttl)), anchor="center")
     _draw_text(screen, f"SCORE {game.score}", 40, (255, 215, 80),
                (GAME_SIZE[0] - 16, 12), anchor="topright")
+    for i in range(MAX_HEALTH):
+        _draw_heart(screen, GAME_SIZE[0] - 28 - (MAX_HEALTH - 1 - i) * 26, 62, 10, i < game.health)
     _draw_bar(screen, font, "x", ctrl.dx, 12)
     _draw_bar(screen, font, "y", ctrl.dy, 32)
     screen.blit(font.render(f"speed x{ctrl.gain:.2f}", True, (200, 200, 200)), (12, 54))
     if not ctrl.present:
         screen.blit(font.render("NO HAND", True, (240, 90, 90)), (12, 78))
+    if game.over:
+        _draw_game_over(screen, game.score)
     pygame.display.flip()
 
 

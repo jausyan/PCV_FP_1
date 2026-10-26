@@ -42,7 +42,7 @@ def main():
         elif time.time() - last_frame_time > STALL_SECONDS:
             ctrl = Control()
 
-        running = game_running() and running
+        running = game_running(game) and running
         update_game(game, ctrl, clock.tick(60) / 1000)
         draw_game(screen, font, game, ctrl)
 
