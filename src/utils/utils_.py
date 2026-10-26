@@ -1,12 +1,17 @@
 import json
+import math
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import cv2
 import numpy as np
+import pygame
 
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.json"
 MAIN_WIN = "controller"
 CTRL_WIN = "controls"
+GAME_SIZE = (800, 600)
+ACCEL, DRAG, MAX_V, DRONE_R = 1100.0, 2.0, 420.0, 28
 
 @dataclass
 class DetectorConfig:
@@ -29,6 +34,13 @@ class DetectorConfig:
     bg_frames: int = 30
     min_solidity: float = 0.45
     max_aspect: float = 3.5
+    smooth_alpha: float = 0.4
+    max_jump_px: float = 150.0
+    stable_frames: int = 3
+    hold_frames: int = 3
+    deadzone: float = 0.15
+    area_min_ratio: float = 0.03
+    area_max_ratio: float = 0.15
 
 
 @dataclass
@@ -62,6 +74,41 @@ class BgState:
 class TrackState:
     bbox: tuple = None
     lost: int = 0
+
+
+@dataclass
+class HandFilter:
+    sm: np.ndarray = None  # smoothed [x, y, w, h, cx, cy, area]
+    last_center: tuple = None
+    stable: int = 0
+    lost: int = 0
+
+
+@dataclass
+class Control:
+    dx: float = 0.0    # -1 left .. 1 right
+    dy: float = 0.0    # -1 down .. 1 up
+    gain: float = 1.0  # speed multiplier from hand size
+    present: bool = False
+
+
+@dataclass
+class Drone:
+    x: float = GAME_SIZE[0] / 2
+    y: float = GAME_SIZE[1] / 2
+    vx: float = 0.0
+    vy: float = 0.0
+    spin: float = 0.0
+
+
+@dataclass
+class Grabber:
+    cap: cv2.VideoCapture
+    frame: np.ndarray = None
+    fid: int = 0
+    running: bool = True
+    lock: threading.Lock = None
+    thread: threading.Thread = None
 
 
 @dataclass
@@ -219,6 +266,34 @@ def detect_hand(frame: np.ndarray, cfg: DetectorConfig, track: TrackState,
     return det, mask, rect
 
 
+def filter_hand(hf: HandFilter, det, cfg: DetectorConfig):
+    """Jump rejection + stable-frame gating + EMA smoothing + short hold on loss.
+
+    Returns the smoothed Detection, or None until the hand is stable / once it is lost.
+    """
+    if det is not None:
+        raw = np.array([*det.bbox, *det.center, det.area], np.float32)
+        jumped = (hf.last_center is not None and
+                  np.hypot(det.center[0] - hf.last_center[0],
+                           det.center[1] - hf.last_center[1]) > cfg.max_jump_px)
+        hf.stable = 1 if (jumped or hf.last_center is None) else hf.stable + 1
+        hf.last_center, hf.lost = det.center, 0
+        if jumped or hf.sm is None:
+            hf.sm = raw
+        else:
+            a = max(0.05, cfg.smooth_alpha)
+            hf.sm = a * raw + (1 - a) * hf.sm
+    else:
+        hf.lost += 1
+        if hf.lost > cfg.hold_frames:
+            hf.sm, hf.last_center, hf.stable = None, None, 0
+
+    if hf.sm is None or hf.stable < cfg.stable_frames:
+        return None
+    x, y, w, h, cx, cy, area = hf.sm
+    return Detection((int(x), int(y), int(w), int(h)), (int(cx), int(cy)), float(area))
+
+
 def set_roi(cfg: DetectorConfig, rect: tuple, shape) -> bool:
     h, w = shape[:2]
     x0, y0, x1, y1 = rect
@@ -248,6 +323,18 @@ def draw_detection(frame: np.ndarray, det) -> None:
     x, y, w, h = det.bbox
     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
     cv2.circle(frame, det.center, 5, (0, 0, 255), -1)
+
+
+def draw_status(frame: np.ndarray, hf: HandFilter, cfg: DetectorConfig) -> None:
+    if hf.sm is None:
+        text, color = "hand: none", (0, 0, 255)
+    elif hf.lost > 0:
+        text, color = f"hand: holding ({hf.lost}/{cfg.hold_frames})", (0, 165, 255)
+    elif hf.stable < cfg.stable_frames:
+        text, color = f"hand: confirming ({hf.stable}/{cfg.stable_frames})", (0, 255, 255)
+    else:
+        text, color = "hand: stable", (0, 255, 0)
+    cv2.putText(frame, text, (8, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
 
 def show(frame: np.ndarray, mask: np.ndarray) -> int:
@@ -298,13 +385,14 @@ def _noop(_):
 
 def create_trackbars(cfg: DetectorConfig) -> None:
     cv2.namedWindow(CTRL_WIN, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(CTRL_WIN, 420, 600)
+    cv2.resizeWindow(CTRL_WIN, 420, 640)
     for name, _field, _i, vmax in _BARS:
         cv2.createTrackbar(name, CTRL_WIN, 0, vmax, _noop)
     cv2.createTrackbar("Blur", CTRL_WIN, 0, 15, _noop)
     cv2.createTrackbar("Morph", CTRL_WIN, 0, 31, _noop)
     cv2.createTrackbar("BgDiff", CTRL_WIN, 0, 100, _noop)
     cv2.createTrackbar("Solid%", CTRL_WIN, 0, 100, _noop)
+    cv2.createTrackbar("Smooth%", CTRL_WIN, 5, 100, _noop)
     set_trackbars(cfg)
 
 
@@ -315,6 +403,7 @@ def set_trackbars(cfg: DetectorConfig) -> None:
     cv2.setTrackbarPos("Morph", CTRL_WIN, cfg.morph_kernel_px)
     cv2.setTrackbarPos("BgDiff", CTRL_WIN, cfg.bg_thresh)
     cv2.setTrackbarPos("Solid%", CTRL_WIN, int(cfg.min_solidity * 100))
+    cv2.setTrackbarPos("Smooth%", CTRL_WIN, int(cfg.smooth_alpha * 100))
 
 
 def read_trackbars(cfg: DetectorConfig) -> None:
@@ -329,6 +418,131 @@ def read_trackbars(cfg: DetectorConfig) -> None:
     cfg.morph_kernel_px = cv2.getTrackbarPos("Morph", CTRL_WIN)
     cfg.bg_thresh = cv2.getTrackbarPos("BgDiff", CTRL_WIN)
     cfg.min_solidity = cv2.getTrackbarPos("Solid%", CTRL_WIN) / 100
+    cfg.smooth_alpha = max(5, cv2.getTrackbarPos("Smooth%", CTRL_WIN)) / 100
+
+# ------------------------------------------------------------ camera thread
+def start_grabber(cap: cv2.VideoCapture) -> Grabber:
+    g = Grabber(cap, lock=threading.Lock())
+
+    def run():
+        while g.running:
+            frame = read_frame(g.cap)
+            if frame is None:
+                continue
+            with g.lock:
+                g.frame, g.fid = frame, g.fid + 1
+
+    g.thread = threading.Thread(target=run, daemon=True)
+    g.thread.start()
+    return g
+
+
+def get_frame(g: Grabber, last_id: int):
+    """Newest frame (a copy) and its id, or (None, last_id) if nothing new."""
+    with g.lock:
+        if g.frame is None or g.fid == last_id:
+            return None, last_id
+        return g.frame.copy(), g.fid
+
+
+def stop_grabber(g: Grabber) -> None:
+    g.running = False
+    g.thread.join(timeout=1)
+
+
+# ------------------------------------------------------------ hand -> drone
+def _deadzone(v: float, dz: float) -> float:
+    v = max(-1.0, min(1.0, v))
+    if abs(v) <= dz:
+        return 0.0
+    return math.copysign((abs(v) - dz) / (1 - dz), v)
+
+
+def hand_to_control(det, cfg: DetectorConfig, shape) -> Control:
+    """Offset from the ROI center -> dx/dy, hand size -> speed gain. No hand -> neutral."""
+    if det is None:
+        return Control()
+    h, w = shape[:2]
+    x0, y0, x1, y1 = roi_rect(shape, cfg)
+    nx = (det.center[0] - (x0 + x1) / 2) / max(1, (x1 - x0) / 2)
+    ny = ((y0 + y1) / 2 - det.center[1]) / max(1, (y1 - y0) / 2)
+    span = max(1e-6, cfg.area_max_ratio - cfg.area_min_ratio)
+    t = max(0.0, min(1.0, (det.area / (w * h) - cfg.area_min_ratio) / span))
+    return Control(_deadzone(nx, cfg.deadzone), _deadzone(ny, cfg.deadzone), 0.6 + 0.8 * t, True)
+
+
+# --------------------------------------------------------------- game
+def init_game():
+    pygame.init()
+    screen = pygame.display.set_mode(GAME_SIZE)
+    pygame.display.set_caption("drone")
+    return screen, pygame.time.Clock(), pygame.font.SysFont(None, 24)
+
+
+def game_running() -> bool:
+    for e in pygame.event.get():
+        if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE):
+            return False
+    return True
+
+
+def update_drone(d: Drone, c: Control, dt: float) -> None:
+    d.vx += c.dx * ACCEL * c.gain * dt
+    d.vy -= c.dy * ACCEL * c.gain * dt  # screen y points down
+    damp = math.exp(-DRAG * dt)
+    d.vx, d.vy = d.vx * damp, d.vy * damp
+    vmax = MAX_V * c.gain
+    speed = math.hypot(d.vx, d.vy)
+    if speed > vmax:
+        d.vx, d.vy = d.vx * vmax / speed, d.vy * vmax / speed
+    d.x += d.vx * dt
+    d.y += d.vy * dt
+    w, h = GAME_SIZE
+    if not DRONE_R <= d.x <= w - DRONE_R:
+        d.x, d.vx = min(max(d.x, DRONE_R), w - DRONE_R), 0.0
+    if not DRONE_R <= d.y <= h - DRONE_R:
+        d.y, d.vy = min(max(d.y, DRONE_R), h - DRONE_R), 0.0
+    d.spin += dt * (18 + math.hypot(d.vx, d.vy) * 0.05)
+
+
+def _bar(screen, font, label, v, y):
+    screen.blit(font.render(label, True, (200, 200, 200)), (12, y))
+    pygame.draw.rect(screen, (70, 70, 80), (70, y + 2, 120, 12))
+    bar = (130, y + 2, int(60 * v), 12) if v >= 0 else (130 + int(60 * v), y + 2, int(-60 * v), 12)
+    pygame.draw.rect(screen, (90, 200, 120), bar)
+
+
+def draw_game(screen, font, d: Drone, c: Control) -> None:
+    screen.fill((24, 28, 38))
+    for gx in range(0, GAME_SIZE[0], 50):
+        pygame.draw.line(screen, (34, 40, 54), (gx, 0), (gx, GAME_SIZE[1]))
+    for gy in range(0, GAME_SIZE[1], 50):
+        pygame.draw.line(screen, (34, 40, 54), (0, gy), (GAME_SIZE[0], gy))
+
+    pygame.draw.ellipse(screen, (16, 18, 24), (d.x - 26, d.y + 24, 52, 12))  # shadow
+    tilt = math.radians(max(-1.0, min(1.0, d.vx / MAX_V)) * 20)
+    cs, sn = math.cos(tilt), math.sin(tilt)
+
+    def pt(px, py):
+        return d.x + px * cs - py * sn, d.y + px * sn + py * cs
+
+    for rx, ry in ((-24, -10), (24, -10), (-24, 10), (24, 10)):
+        pygame.draw.line(screen, (150, 150, 160), pt(0, 0), pt(rx, ry), 4)
+        cx, cy = pt(rx, ry)
+        for k in range(2):  # spinning blades
+            a = d.spin + k * math.pi / 2
+            pygame.draw.line(screen, (230, 230, 240),
+                             (cx - 11 * math.cos(a), cy - 4 * math.sin(a)),
+                             (cx + 11 * math.cos(a), cy + 4 * math.sin(a)), 2)
+    pygame.draw.circle(screen, (80, 170, 255) if c.present else (150, 80, 80), (int(d.x), int(d.y)), 11)
+
+    _bar(screen, font, "x", c.dx, 12)
+    _bar(screen, font, "y", c.dy, 32)
+    screen.blit(font.render(f"speed x{c.gain:.2f}", True, (200, 200, 200)), (12, 54))
+    if not c.present:
+        screen.blit(font.render("NO HAND", True, (240, 90, 90)), (12, 78))
+    pygame.display.flip()
+
 
 def setup_sampling(state: SampleState) -> None:
     def on_mouse(event, x, y, _flags, _param):
